@@ -1,0 +1,20 @@
+movie-recommender/
+├── README.md
+├── requirements.txt
+├── data/
+│   └── (place movielens csvs here: ratings.csv, movies.csv, tags.csv)
+├── notebooks/
+│   └── exploration.ipynb
+├── src/
+│   ├── data_prep.py
+│   ├── content_based.py
+│   ├── collaborative.py
+│   ├── hybrid.py
+│   ├── api.py
+│   └── utils.py
+├── models/
+│   ├── cb_model.pkl
+│   └── cf_model.pkl
+├── web/
+│   └── streamlit_app.py
+└── Dockerfile
