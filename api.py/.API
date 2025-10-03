@@ -1,0 +1,55 @@
+# src/api.py
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+from functools import lru_cache
+import joblib
+from pathlib import Path
+import pandas as pd
+
+BASE = Path(__file__).resolve().parents[1]
+MODELS_DIR = BASE / "models"
+DATA_DIR = BASE / "data"
+
+app = FastAPI(title="MovieLens Hybrid Recommender")
+
+CB_MODEL_PATH = MODELS_DIR / "cb_model.pkl"
+CF_MODEL_PATH = MODELS_DIR / "cf_model.pkl"
+MOVIES_CLEAN = DATA_DIR / "movies_clean.csv"
+
+@lru_cache()
+def load_assets():
+    cb = joblib.load(CB_MODEL_PATH)
+    cf = joblib.load(CF_MODEL_PATH)
+    movies = cb['movies']
+    return cb, cf, movies
+
+class RecOut(BaseModel):
+    movieId: int
+    title: str
+    score: float
+
+@app.get("/health")
+def health():
+    return {"status":"ok"}
+
+@app.get("/recommend/user/{user_id}", response_model=List[RecOut])
+def recommend_for_user(user_id: int, n: int = 10, cb_weight: float = 0.5, cf_weight: float = 0.5):
+    cb, cf, movies = load_assets()
+    # lazy import hybrid to avoid circular loads on startup
+    from src.hybrid import hybrid_recommend_for_user
+    try:
+        recs = hybrid_recommend_for_user(user_id=user_id, top_n=n, cb_weight=cb_weight, cf_weight=cf_weight)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return recs
+
+@app.get("/recommend/movie/{movie_id}", response_model=List[RecOut])
+def recommend_similar(movie_id: int, n: int = 10):
+    cb, cf, movies = load_assets()
+    from src.content_based import similar_movies
+    try:
+        recs = similar_movies(movie_id=movie_id, top_n=n, cb_model=cb)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    return recs
