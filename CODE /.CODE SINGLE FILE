@@ -1,0 +1,485 @@
+"""
+Comprehensive single-file Movie Recommender System
+- Content-based using TF-IDF on metadata (title, genres, overview)
+- Collaborative filtering using matrix factorization (SVD via sklearn TruncatedSVD on user-item matrix)
+- Hybrid: weighted blending of content & collaborative scores
+- Simple Flask web interface (single-file templates)
+
+This file is intended as a starting, general-purpose reference implementation.
+Replace the synthetic/sample data with MovieLens or your dataset for production.
+
+Requirements (pip):
+flask
+scikit-learn
+pandas
+numpy
+scipy
+joblib
+nltk
+
+Run:
+python Movie_Recommender_System.py
+
+Then open http://127.0.0.1:5000
+
+Note: This single-file design is for learning/prototyping. For production split into modules,
+add authentication, caching, async processing, and use a proper model store / DB.
+"""
+
+from flask import Flask, request, render_template_string, jsonify, redirect, url_for
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import linear_kernel, cosine_similarity
+from sklearn.decomposition import TruncatedSVD
+from sklearn.neighbors import NearestNeighbors
+from scipy.sparse import csr_matrix
+import joblib
+import os
+import json
+import random
+from typing import List, Tuple, Dict
+import warnings
+warnings.filterwarnings('ignore')
+
+# ---------------------------
+# Configuration & Utilities
+# ---------------------------
+PROJECT_DIR = os.path.dirname(__file__)
+MODEL_DIR = os.path.join(PROJECT_DIR, 'models')
+if not os.path.exists(MODEL_DIR):
+    os.makedirs(MODEL_DIR)
+
+RANDOM_SEED = 42
+np.random.seed(RANDOM_SEED)
+random.seed(RANDOM_SEED)
+
+# ---------------------------
+# Sample / Synthetic Data
+# ---------------------------
+# For quick prototyping, we create a small synthetic dataset. Replace with MovieLens 100k/1M for real use.
+
+def generate_sample_movies(n=1000) -> pd.DataFrame:
+    """Generate synthetic movie metadata."""
+    genres = ['Action', 'Adventure', 'Comedy', 'Romance', 'Drama', 'Horror', 'Sci-Fi', 'Fantasy', 'Thriller', 'Animation']
+    rows = []
+    for i in range(n):
+        movie_id = i + 1
+        title = f"Movie {movie_id}"
+        # pick 1-3 genres
+        g = random.sample(genres, k=random.randint(1, 3))
+        genre_str = '|'.join(g)
+        overview = f"A {random.choice(['gripping','heartfelt','funny','dark','mysterious','epic'])} {g[0].lower()} story about character who {random.choice(['learns','fights','falls in love','discovers','investigates','escapes'])}."
+        rows.append({'movieId': movie_id, 'title': title, 'genres': genre_str, 'overview': overview})
+    return pd.DataFrame(rows)
+
+
+def generate_sample_ratings(movies: pd.DataFrame, num_users=300, density=0.05) -> pd.DataFrame:
+    """Generate sparse user-movie ratings matrix in long format: userId, movieId, rating"""
+    rows = []
+    movie_ids = movies['movieId'].tolist()
+    for user in range(1, num_users+1):
+        # number of ratings per user
+        k = max(1, int(len(movie_ids) * density * random.uniform(0.5, 1.5)))
+        sampled = random.sample(movie_ids, k=k)
+        for m in sampled:
+            # rating 1-5
+            rating = random.choice([3,4,5,2,1]) if random.random() > 0.1 else random.choice([1,2])
+            rows.append({'userId': user, 'movieId': m, 'rating': rating})
+    return pd.DataFrame(rows)
+
+# ---------------------------
+# Preprocessing & Features
+# ---------------------------
+
+def build_content_matrix(movies: pd.DataFrame, text_cols: List[str]=['title', 'genres', 'overview']) -> Tuple[csr_matrix, TfidfVectorizer]:
+    """Build a TF-IDF matrix from specified text columns.
+    Returns sparse matrix (n_movies x n_features) and the vectorizer.
+    """
+    # combine columns
+    meta = movies[text_cols].fillna('').astype(str).agg(' '.join, axis=1)
+    vectorizer = TfidfVectorizer(stop_words='english', max_features=20000)
+    tfidf = vectorizer.fit_transform(meta)
+    return tfidf, vectorizer
+
+# ---------------------------
+# Content-based Recommender
+# ---------------------------
+class ContentBasedRecommender:
+    def __init__(self):
+        self.tfidf = None
+        self.vectorizer = None
+        self.movie_index = None  # mapping movieId -> row index
+        self.index_movie = None
+
+    def fit(self, movies: pd.DataFrame, text_cols=['title','genres','overview']):
+        self.movie_ids = movies['movieId'].tolist()
+        self.movie_index = {mid: i for i, mid in enumerate(self.movie_ids)}
+        self.index_movie = {i: mid for mid, i in self.movie_index.items()}
+        self.tfidf, self.vectorizer = build_content_matrix(movies, text_cols)
+
+    def recommend_by_movie(self, movie_id:int, topn:int=10) -> List[Tuple[int, float]]:
+        if movie_id not in self.movie_index:
+            return []
+        idx = self.movie_index[movie_id]
+        cosine_similarities = linear_kernel(self.tfidf[idx:idx+1], self.tfidf).flatten()
+        related_indices = cosine_similarities.argsort()[::-1]
+        results = []
+        for i in related_indices[1:topn+1]:
+            results.append((self.index_movie[i], float(cosine_similarities[i])))
+        return results
+
+    def recommend_by_text(self, text:str, topn=10) -> List[Tuple[int,float]]:
+        vec = self.vectorizer.transform([text])
+        cosine_similarities = linear_kernel(vec, self.tfidf).flatten()
+        indices = cosine_similarities.argsort()[::-1][:topn]
+        return [(self.index_movie[i], float(cosine_similarities[i])) for i in indices]
+
+    def save(self, path:str):
+        joblib.dump({'vectorizer': self.vectorizer, 'tfidf': self.tfidf, 'movie_index': self.movie_index, 'index_movie': self.index_movie}, path)
+
+    def load(self, path:str):
+        d = joblib.load(path)
+        self.vectorizer = d['vectorizer']
+        self.tfidf = d['tfidf']
+        self.movie_index = d['movie_index']
+        self.index_movie = d['index_movie']
+
+# ---------------------------
+# Collaborative Filtering (SVD-based)
+# ---------------------------
+class CollaborativeFiltering:
+    def __init__(self, n_components=50):
+        self.n_components = n_components
+        self.user_mapper = None
+        self.movie_mapper = None
+        self.user_index = None
+        self.movie_index = None
+        self.svd = None
+        self.user_factors = None
+        self.item_factors = None
+        self.interaction_matrix = None  # csr matrix
+
+    def fit(self, ratings: pd.DataFrame, n_components:int=None):
+        if n_components is None:
+            n_components = self.n_components
+        # create mappings
+        users = ratings['userId'].unique().tolist()
+        movies = ratings['movieId'].unique().tolist()
+        self.user_index = {u:i for i,u in enumerate(users)}
+        self.movie_index = {m:i for i,m in enumerate(movies)}
+        self.user_mapper = {i:u for u,i in self.user_index.items()}
+        self.movie_mapper = {i:m for m,i in self.movie_index.items()}
+        # build sparse matrix
+        rows = ratings['userId'].map(self.user_index)
+        cols = ratings['movieId'].map(self.movie_index)
+        data = ratings['rating'].astype(float)
+        self.interaction_matrix = csr_matrix((data, (rows, cols)), shape=(len(users), len(movies)))
+        # SVD
+        self.svd = TruncatedSVD(n_components=n_components, random_state=RANDOM_SEED)
+        self.item_factors = self.svd.fit_transform(self.interaction_matrix.T)  # items x k
+        self.user_factors = None
+        if hasattr(self.svd, 'components_'):
+            # projected users in the same space
+            comps = self.svd.components_
+            # We can approximate user_factors by projecting users onto components
+            self.user_factors = self.interaction_matrix.dot(self.svd.components_.T)
+
+    def recommend_for_user(self, user_id:int, topn=10) -> List[Tuple[int, float]]:
+        if user_id not in self.user_index:
+            return []
+        uidx = self.user_index[user_id]
+        user_vector = self.user_factors[uidx]
+        sims = cosine_similarity(user_vector.reshape(1,-1), self.item_factors).flatten()
+        top = sims.argsort()[::-1][:topn]
+        return [(self.movie_mapper[i], float(sims[i])) for i in top]
+
+    def recommend_for_movie(self, movie_id:int, topn=10) -> List[Tuple[int, float]]:
+        if movie_id not in self.movie_index:
+            return []
+        midx = self.movie_index[movie_id]
+        item_vector = self.item_factors[midx].reshape(1,-1)
+        sims = cosine_similarity(item_vector, self.item_factors).flatten()
+        top = sims.argsort()[::-1][1:topn+1]
+        return [(self.movie_mapper[i], float(sims[i])) for i in top]
+
+    def save(self, path:str):
+        joblib.dump({'svd': self.svd, 'user_index': self.user_index, 'movie_index': self.movie_index, 'user_mapper': self.user_mapper, 'movie_mapper': self.movie_mapper, 'item_factors': self.item_factors, 'user_factors': self.user_factors}, path)
+
+    def load(self, path:str):
+        d = joblib.load(path)
+        self.svd = d['svd']
+        self.user_index = d['user_index']
+        self.movie_index = d['movie_index']
+        self.user_mapper = d['user_mapper']
+        self.movie_mapper = d['movie_mapper']
+        self.item_factors = d['item_factors']
+        self.user_factors = d['user_factors']
+
+# ---------------------------
+# Hybrid Recommender
+# ---------------------------
+class HybridRecommender:
+    def __init__(self, content_model: ContentBasedRecommender, collab_model: CollaborativeFiltering, alpha:float=0.5):
+        """alpha controls weight of content vs collaborative (0..1)."""
+        self.content = content_model
+        self.collab = collab_model
+        self.alpha = alpha
+
+    def recommend_for_user(self, user_id:int, topn=10) -> List[Tuple[int,float]]:
+        # collaborative recommendations
+        collab_recs = dict(self.collab.recommend_for_user(user_id, topn=topn*5)) if self.collab.user_factors is not None else {}
+        # content-based: aggregate user's liked movies and get similar movies
+        # find movies the user rated >=4
+        # we need ratings data - but collaborative model keeps no raw ratings here; so this function assumes you have ratings access externally.
+        # For prototype, we'll blend according to available scores.
+        hybrid_scores = {}
+        for mid, score in collab_recs.items():
+            hybrid_scores[mid] = hybrid_scores.get(mid, 0) + (1-self.alpha)*score
+        # for content, recommend from top-rated items in content model (global) - simple approach
+        # We'll score content recommendations for each movie in dataset by average similarity to top items in collab recs
+        # If no collab recs exist, return top content-only
+        if len(collab_recs) == 0:
+            # fallback: popular content-based
+            content_recs = self.content.recommend_by_text('popular movie', topn=topn*2)
+            for mid, s in content_recs:
+                hybrid_scores[mid] = hybrid_scores.get(mid, 0) + self.alpha * s
+        else:
+            # for each collab top movie, get content neighbors
+            for seed_mid in list(collab_recs.keys())[:5]:
+                try:
+                    conts = self.content.recommend_by_movie(seed_mid, topn=10)
+                    for mid, s in conts:
+                        hybrid_scores[mid] = hybrid_scores.get(mid, 0) + self.alpha * s
+                except Exception:
+                    continue
+        # sort
+        items = sorted(hybrid_scores.items(), key=lambda x: x[1], reverse=True)
+        # remove duplicates and return topn
+        seen = set()
+        res = []
+        for mid, sc in items:
+            if mid in seen:
+                continue
+            seen.add(mid)
+            res.append((mid, sc))
+            if len(res) >= topn:
+                break
+        return res
+
+# ---------------------------
+# Utility functions for lookup & popularity
+# ---------------------------
+
+def create_mappings(movies: pd.DataFrame) -> Tuple[Dict[int, Dict], Dict[int,int]]:
+    movie_dict = movies.set_index('movieId').T.to_dict()
+    return movie_dict
+
+# ---------------------------
+# Small evaluation helpers
+# ---------------------------
+
+def precision_at_k(recommended: List[int], relevant: List[int], k:int=10) -> float:
+    recommended_k = recommended[:k]
+    rel_set = set(relevant)
+    if len(recommended_k) == 0:
+        return 0.0
+    return sum([1 for r in recommended_k if r in rel_set]) / float(len(recommended_k))
+
+# ---------------------------
+# Quick end-to-end pipeline: build models from sample data
+# ---------------------------
+
+def build_and_save_sample_models():
+    print('Generating sample data...')
+    movies = generate_sample_movies(n=1500)
+    ratings = generate_sample_ratings(movies, num_users=500, density=0.03)
+    print(f'Movies: {len(movies)}, Ratings: {len(ratings)}')
+    # content model
+    print('Fitting content model...')
+    content = ContentBasedRecommender()
+    content.fit(movies)
+    content_path = os.path.join(MODEL_DIR, 'content_model.joblib')
+    content.save(content_path)
+    # collaborative
+    print('Fitting collaborative model (SVD)...')
+    collab = CollaborativeFiltering(n_components=50)
+    collab.fit(ratings, n_components=50)
+    collab_path = os.path.join(MODEL_DIR, 'collab_model.joblib')
+    collab.save(collab_path)
+    # hybrid
+    hybrid = HybridRecommender(content, collab, alpha=0.6)
+    hybrid_path = os.path.join(MODEL_DIR, 'hybrid_model.joblib')
+    joblib.dump({'alpha': hybrid.alpha}, hybrid_path)
+    # save data samples
+    movies.to_csv(os.path.join(MODEL_DIR, 'movies_sample.csv'), index=False)
+    ratings.to_csv(os.path.join(MODEL_DIR, 'ratings_sample.csv'), index=False)
+    print('Sample models saved to models/ . Replace with real dataset for production.')
+    return movies, ratings, content, collab, hybrid
+
+# ---------------------------
+# Flask Web App
+# ---------------------------
+app = Flask(__name__)
+
+# global objects (will be loaded or built on first run)
+GLOBAL = {'movies': None, 'ratings': None, 'content': None, 'collab': None, 'hybrid': None, 'movie_dict': None}
+
+HOME_HTML = '''
+<!doctype html>
+<title>Movie Recommender</title>
+<h1>Intelligent Movie Recommender</h1>
+<form action="/search">
+  <input name="q" placeholder="search title, genre, or text" size=40>
+  <button type="submit">Search</button>
+</form>
+<p>Try: <a href="/recommend_user?user_id=1">Recommend for user 1</a> | <a href="/popular">Popular</a></p>
+<hr>
+<h3>Quick Actions</h3>
+<ul>
+<li><a href="/rebuild">(Re)build sample models</a> - use only for demo</li>
+<li><a href="/status">Model status</a></li>
+</ul>
+'''
+
+MOVIE_PAGE_HTML = '''
+<!doctype html>
+<title>{{title}}</title>
+<h1>{{title}}</h1>
+<p><b>Genres:</b> {{genres}}</p>
+<p><b>Overview:</b> {{overview}}</p>
+<hr>
+<p><a href="/recommend_by_movie?movie_id={{movieId}}">Find similar movies</a></p>
+<p><a href="/">Back</a></p>
+'''
+
+# helpers
+
+def ensure_models_loaded():
+    if GLOBAL['movies'] is None:
+        # try to load saved sample
+        movies_path = os.path.join(MODEL_DIR, 'movies_sample.csv')
+        ratings_path = os.path.join(MODEL_DIR, 'ratings_sample.csv')
+        content_path = os.path.join(MODEL_DIR, 'content_model.joblib')
+        collab_path = os.path.join(MODEL_DIR, 'collab_model.joblib')
+        if os.path.exists(movies_path) and os.path.exists(ratings_path) and os.path.exists(content_path) and os.path.exists(collab_path):
+            print('Loading models and data from models/ ...')
+            movies = pd.read_csv(movies_path)
+            ratings = pd.read_csv(ratings_path)
+            content = ContentBasedRecommender()
+            content.load(content_path)
+            collab = CollaborativeFiltering()
+            collab.load(collab_path)
+            hybrid_info = joblib.load(os.path.join(MODEL_DIR, 'hybrid_model.joblib')) if os.path.exists(os.path.join(MODEL_DIR, 'hybrid_model.joblib')) else {'alpha':0.5}
+            hybrid = HybridRecommender(content, collab, alpha=hybrid_info.get('alpha',0.5))
+            GLOBAL.update({'movies': movies, 'ratings': ratings, 'content': content, 'collab': collab, 'hybrid': hybrid, 'movie_dict': create_mappings(movies)})
+        else:
+            # build sample models
+            movies, ratings, content, collab, hybrid = build_and_save_sample_models()
+            GLOBAL.update({'movies': movies, 'ratings': ratings, 'content': content, 'collab': collab, 'hybrid': hybrid, 'movie_dict': create_mappings(movies)})
+
+@app.route('/')
+def home():
+    ensure_models_loaded()
+    return render_template_string(HOME_HTML)
+
+@app.route('/status')
+def status():
+    ensure_models_loaded()
+    movies = GLOBAL['movies']
+    ratings = GLOBAL['ratings']
+    content = GLOBAL['content']
+    collab = GLOBAL['collab']
+    return jsonify({
+        'movies': len(movies) if movies is not None else 0,
+        'ratings': len(ratings) if ratings is not None else 0,
+        'content_model_loaded': content is not None,
+        'collaborative_model_loaded': collab is not None
+    })
+
+@app.route('/rebuild')
+def rebuild():
+    # rebuild sample models
+    movies, ratings, content, collab, hybrid = build_and_save_sample_models()
+    GLOBAL.update({'movies': movies, 'ratings': ratings, 'content': content, 'collab': collab, 'hybrid': hybrid, 'movie_dict': create_mappings(movies)})
+    return redirect(url_for('status'))
+
+@app.route('/movie/<int:movie_id>')
+def movie_page(movie_id:int):
+    ensure_models_loaded()
+    movies = GLOBAL['movies']
+    md = GLOBAL['movie_dict'].get(movie_id)
+    if md is None:
+        return 'Movie not found', 404
+    return render_template_string(MOVIE_PAGE_HTML, **md)
+
+@app.route('/search')
+def search():
+    ensure_models_loaded()
+    q = request.args.get('q','').lower().strip()
+    movies = GLOBAL['movies']
+    if q == '':
+        return redirect(url_for('home'))
+    # simple substring match on title or genres
+    hits = movies[movies[['title','genres','overview']].fillna('').astype(str).apply(lambda row: q in ' '.join(row.values).lower(), axis=1)]
+    results = hits.head(50).to_dict(orient='records')
+    return jsonify(results)
+
+@app.route('/recommend_by_movie')
+def recommend_by_movie():
+    ensure_models_loaded()
+    try:
+        movie_id = int(request.args.get('movie_id'))
+    except Exception:
+        return 'movie_id query param required', 400
+    content = GLOBAL['content']
+    collab = GLOBAL['collab']
+    movies = GLOBAL['movies']
+    content_recs = content.recommend_by_movie(movie_id, topn=12)
+    collab_recs = collab.recommend_for_movie(movie_id, topn=12)
+    return jsonify({'content': [{'movieId': mid, 'score': s, 'title': GLOBAL['movie_dict'].get(mid,{}).get('title','')} for mid,s in content_recs], 'collab':[{'movieId':mid,'score':s,'title':GLOBAL['movie_dict'].get(mid,{}).get('title','')} for mid,s in collab_recs]})
+
+@app.route('/recommend_user')
+def recommend_user():
+    ensure_models_loaded()
+    try:
+        user_id = int(request.args.get('user_id'))
+    except Exception:
+        return 'user_id query param required', 400
+    collab = GLOBAL['collab']
+    hybrid = GLOBAL['hybrid']
+    movies = GLOBAL['movies']
+    # collaborative
+    collab_recs = collab.recommend_for_user(user_id, topn=20)
+    # hybrid
+    hybrid_recs = hybrid.recommend_for_user(user_id, topn=20)
+    return jsonify({'collaborative': [{'movieId':mid,'score':s,'title':GLOBAL['movie_dict'].get(mid,{}).get('title','')} for mid,s in collab_recs], 'hybrid':[{'movieId':mid,'score':s,'title':GLOBAL['movie_dict'].get(mid,{}).get('title','')} for mid,s in hybrid_recs]})
+
+@app.route('/recommend_text')
+def recommend_text():
+    ensure_models_loaded()
+    q = request.args.get('q','')
+    if q.strip() == '':
+        return 'q query param required', 400
+    content = GLOBAL['content']
+    recs = content.recommend_by_text(q, topn=20)
+    return jsonify([{'movieId':mid,'score':s,'title':GLOBAL['movie_dict'].get(mid,{}).get('title','')} for mid,s in recs])
+
+@app.route('/popular')
+def popular():
+    ensure_models_loaded()
+    ratings = GLOBAL['ratings']
+    movies = GLOBAL['movies']
+    pop = ratings.groupby('movieId')['rating'].agg(['count','mean']).reset_index()
+    pop = pop.merge(movies[['movieId','title']], on='movieId', how='left')
+    top = pop.sort_values(['count','mean'], ascending=False).head(50)
+    return jsonify(top.to_dict(orient='records'))
+
+# ---------------------------
+# CLI & Utilities
+# ---------------------------
+if __name__ == '__main__':
+    # If models not present, build sample models automatically
+    ensure_models_loaded()
+    print('Starting Flask app on http://127.0.0.1:5000')
+    app.run(debug=True)
