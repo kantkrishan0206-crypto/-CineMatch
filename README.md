@@ -2,9 +2,6 @@
 Movie Recommender  AI System: "An intelligent Movie Recommender System that suggests films using content-based, collaborative, and hybrid filtering. Built with Python and ML algorithms, it delivers personalized recommendations with data insights and a simple web interface."
 # 🎬 Movie Recommender System
 
-<p align="center">
-  <img src="https://via.placeholder.com/600x150.png?text=MOVIE+RECOMMENDER+SYSTEM" alt="Movie Recommender System Logo" width="600"/>
-</p>
 
 An intelligent **Movie Recommender System** that suggests films using **content-based, collaborative, and hybrid filtering**. Built with Python and ML algorithms, it delivers **personalized recommendations**, **data insights**, and a **simple interactive web interface**.
 
