@@ -115,6 +115,3 @@ Contributions are welcome! Please fork the repo, create a feature branch, and su
 This project is **MIT Licensed**.
 
 ---
-
-<p align="center">Made with ❤️ by Your Name</p>
-
