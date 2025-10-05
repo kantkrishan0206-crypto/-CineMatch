@@ -1,7 +1,8 @@
 # -CineMatch
 Movie Recommender  AI System: "An intelligent Movie Recommender System that suggests films using content-based, collaborative, and hybrid filtering. Built with Python and ML algorithms, it delivers personalized recommendations with data insights and a simple web interface."
 <img width="1600" height="700" alt="Movie Recommendation Diagram" src="https://labelyourdata.com/cms/wp-content/uploads/2022/04/movie-recommendation-with-machine-learning_4.png" />    
-<img width="1600" height="700" alt="Movie Recommendation Diagram" src="https://labelyourdata.com/cms/wp-content/uploads/2022/04/movie-recommendation-with-machine-learning_4.png" />
+
+<img width="1600" height="700" alt="Mathematics Figure" src="https://pub.mdpi-res.com/mathematics/mathematics-10-01568/article_deploy/html/images/mathematics-10-01568-g001-550.jpg?1651919186" />
 # 🎬 Movie Recommender System
 An intelligent **Movie Recommender System** that suggests films using **content-based, collaborative, and hybrid filtering**. Built with Python and ML algorithms, it delivers **personalized recommendations**, **data insights**, and a **simple interactive web interface**.
 
